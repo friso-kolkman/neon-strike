@@ -34,17 +34,21 @@ const ui = {
   pause: $('pause'), btnResume: $('btnResume'), btnRestart: $('btnRestart'), btnQuit: $('btnQuit'),
   death: $('death'), deathStats: $('deathStats'), btnRetry: $('btnRetry'), btnAbandon: $('btnAbandon'),
   win: $('win'), winStats: $('winStats'), btnAgain: $('btnAgain'),
+  touch: $('touch'), stickZone: $('stickZone'), stickNub: $('stickNub'),
+  btnFire: $('btnFire'), btnJump: $('btnJump'), btnDashT: $('btnDashT'), btnPause: $('btnPause'),
 };
 
 const params = new URLSearchParams(location.search);
 const TEST = params.has('test');
+const TOUCH = params.has('touch') || window.matchMedia('(pointer: coarse)').matches;
 const SHOW_FPS = TEST || params.has('fps');
 if (SHOW_FPS) ui.fpsEl.classList.remove('hidden');
+if (TOUCH) document.body.classList.add('touchmode');
 
 // ============================================================ renderer / scene
 const canvas = $('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, TOUCH ? 1.3 : 1.6));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
@@ -63,7 +67,7 @@ const boomLight = new THREE.PointLight(0xff8844, 0, 22);
 scene.add(boomLight);
 
 window.addEventListener('resize', () => {
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, TOUCH ? 1.3 : 1.6));
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1786,10 +1790,11 @@ function updateHUD() {
   ui.odlabel.classList.toggle('on', game.overdrive > 0);
   if (game.overdrive > 0) ui.odlabel.textContent = 'OVERDRIVE ' + game.overdrive.toFixed(1);
   // mouse-capture hint: never leave the player aiming a dead mouse without telling them
-  const needLock = !TEST && !pointerLocked && game.state === 'playing';
+  const needLock = !TEST && !TOUCH && !pointerLocked && game.state === 'playing';
   ui.hint.style.opacity = needLock ? '1' : '.45';
   ui.hint.style.color = needLock ? '#ffd34d' : '';
   ui.hint.textContent = needLock ? 'CLICK TO CAPTURE MOUSE' : 'ESC TO PAUSE';
+  if (TOUCH) ui.touch.classList.toggle('hidden', game.state !== 'playing');
 }
 
 // ============================================================ input
@@ -1808,7 +1813,7 @@ function scheduleLockRetry() {
 }
 
 function requestLock() {
-  if (TEST) return;
+  if (TEST || TOUCH) return;
   try {
     const p = canvas.requestPointerLock();
     if (p && p.catch) p.catch(() => scheduleLockRetry());
@@ -1881,6 +1886,89 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && game.state === 'playing') pauseGame();
 });
 
+// ============================================================ touch controls
+const touchState = { moveX: 0, moveZ: 0, sprint: false, fire: false, stickId: null, aimId: null, ox: 0, oy: 0, ax: 0, ay: 0 };
+
+if (TOUCH) {
+  const unlockAudio = () => { audio.init(); audio.resume(); };
+
+  const updateStick = (t) => {
+    const dx = clamp((t.clientX - touchState.ox) / 45, -1, 1);
+    const dy = clamp((t.clientY - touchState.oy) / 45, -1, 1);
+    touchState.moveX = dx;
+    touchState.moveZ = -dy;
+    touchState.sprint = Math.hypot(dx, dy) > 0.92;
+    ui.stickNub.style.transform = `translate(${dx * 38}px, ${dy * 38}px)`;
+  };
+
+  ui.stickZone.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    unlockAudio();
+    const t = e.changedTouches[0];
+    if (touchState.stickId !== null) return;
+    touchState.stickId = t.identifier;
+    const r = ui.stickZone.getBoundingClientRect();
+    touchState.ox = r.left + r.width / 2;
+    touchState.oy = r.top + r.height / 2;
+    updateStick(t);
+  }, { passive: false });
+
+  // anywhere else on the canvas: drag to aim
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    unlockAudio();
+    if (touchState.aimId !== null) return;
+    const t = e.changedTouches[0];
+    touchState.aimId = t.identifier;
+    touchState.ax = t.clientX;
+    touchState.ay = t.clientY;
+  }, { passive: false });
+
+  document.addEventListener('touchmove', (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchState.stickId) {
+        updateStick(t);
+      } else if (t.identifier === touchState.aimId && game.state === 'playing') {
+        const s = sens * 0.00014;
+        player.yaw -= (t.clientX - touchState.ax) * s;
+        player.pitch -= (t.clientY - touchState.ay) * s;
+        player.pitch = clamp(player.pitch, -1.52, 1.52);
+        touchState.ax = t.clientX;
+        touchState.ay = t.clientY;
+      }
+    }
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  const endTouch = (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchState.stickId) {
+        touchState.stickId = null;
+        touchState.moveX = 0; touchState.moveZ = 0; touchState.sprint = false;
+        ui.stickNub.style.transform = 'translate(0px, 0px)';
+      } else if (t.identifier === touchState.aimId) {
+        touchState.aimId = null;
+      }
+    }
+  };
+  document.addEventListener('touchend', endTouch);
+  document.addEventListener('touchcancel', endTouch);
+
+  const btn = (el, down, up) => {
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); unlockAudio(); down(); }, { passive: false });
+    if (up) el.addEventListener('touchend', (e) => { e.preventDefault(); up(); }, { passive: false });
+  };
+  btn(ui.btnFire, () => { touchState.fire = true; }, () => { touchState.fire = false; });
+  btn(ui.btnJump, () => { if (game.state === 'playing') doJump(); });
+  btn(ui.btnDashT, () => doDash());
+  btn(ui.btnPause, () => pauseGame());
+
+  // tap a weapon slot to switch
+  Array.from(ui.slots.children).forEach((sp, i) => {
+    sp.addEventListener('touchstart', (e) => { e.preventDefault(); if (game.state === 'playing') switchWeapon(i); }, { passive: false });
+  });
+}
+
 function doJump() {
   if (player.onGround) {
     player.vel.y = 8.8;
@@ -1903,8 +1991,8 @@ function doDash() {
   lastDashTime = game.time;
   const fX = -Math.sin(player.yaw), fZ = -Math.cos(player.yaw);
   const rX = Math.cos(player.yaw), rZ = -Math.sin(player.yaw);
-  const ix = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
-  const iz = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+  const ix = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) + touchState.moveX;
+  const iz = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0) + touchState.moveZ;
   player.dashDir.set(fX * iz + rX * ix, 0, fZ * iz + rZ * ix);
   if (player.dashDir.lengthSq() < 0.01) player.dashDir.set(fX, 0, fZ);
   player.dashDir.normalize();
@@ -1921,9 +2009,9 @@ function updatePlayer(dt) {
 
   const f = _v1.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
   const r = _v2.set(Math.cos(player.yaw), 0, -Math.sin(player.yaw));
-  const ix = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
-  const iz = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
-  const sprinting = (keys.ShiftLeft || keys.ShiftRight) && iz > 0;
+  const ix = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) + touchState.moveX;
+  const iz = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0) + touchState.moveZ;
+  const sprinting = ((keys.ShiftLeft || keys.ShiftRight) || touchState.sprint) && iz > 0;
   const speed = sprinting ? 11 : 7.5;
 
   const wish = _v3.copy(f).multiplyScalar(iz).addScaledVector(r, ix);
@@ -1982,7 +2070,7 @@ function updatePlayer(dt) {
   }
 
   // fire
-  if (mouseDown || keys.KeyF) tryFire();
+  if (mouseDown || keys.KeyF || touchState.fire) tryFire();
 
   // light decay
   muzzleLight.intensity = Math.max(0, muzzleLight.intensity - dt * 600);
